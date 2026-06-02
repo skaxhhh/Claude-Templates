@@ -1,0 +1,378 @@
+# 프로젝트별 자동화 규칙 (hooks.yaml)
+
+이 파일을 `.claude/hooks/hooks.yaml`에 저장하세요.
+필요에 따라 프로젝트별로 커스터마이징하면 됩니다.
+
+---
+
+```yaml
+# ============================================================
+# Claude Code Hooks Configuration
+# 
+# 역할: 특정 이벤트 발생 시 자동으로 검증/정리 작업 수행
+# 위치: .claude/hooks/hooks.yaml
+# 
+# Hook은 다음 상황에서 자동 실행됩니다:
+# - file-write: 파일 저장할 때
+# - bash-command: bash 명령 실행 시
+# - git-operation: git 작업 시
+# ============================================================
+
+hooks:
+  # ============================================================
+  # [1] 코드 작성 후 자동 포매팅
+  # ============================================================
+  
+  - name: auto-format-typescript
+    description: TypeScript/JavaScript 파일 저장 시 자동 포매팅
+    on: file-write
+    match: "src/.*\\.(ts|tsx|js|jsx)$"
+    context: implementer
+    disabled: false
+    action: |
+      # prettier로 자동 포매팅
+      npx prettier --write "$FILE"
+      
+      # eslint로 자동 수정 가능한 항목 수정
+      npx eslint --fix "$FILE"
+
+  # ============================================================
+  # [2] 디버깅 코드 커밋 방지
+  # ============================================================
+  
+  - name: block-debug-code
+    description: console.log, debugger, TODO 커밋 방지
+    on: bash-command
+    match: "^git commit"
+    context: implementer
+    disabled: false
+    action: |
+      # 커밋 전 디버깅 코드 확인
+      DEBUG_COUNT=$(grep -r "console\.log\|debugger\|TODO:" \
+        --include="*.ts" --include="*.js" src/ 2>/dev/null | wc -l)
+      
+      if [ $DEBUG_COUNT -gt 0 ]; then
+        echo "❌ ERROR: 디버깅 코드를 제거한 후 커밋하세요"
+        echo ""
+        echo "발견된 디버깅 코드:"
+        grep -r "console\.log\|debugger\|TODO:" \
+          --include="*.ts" --include="*.js" src/ | head -10
+        exit 1
+      fi
+
+  # ============================================================
+  # [3] 민감한 정보 노출 방지
+  # ============================================================
+  
+  - name: block-secrets
+    description: 비밀번호, API 키 등이 코드에 있는지 확인
+    on: bash-command
+    match: "^git commit"
+    context: implementer
+    disabled: false
+    action: |
+      # 민감한 정보 패턴 확인
+      SECRETS=$(grep -r "password.*=\|secret.*=\|api.?key.*=\|token.*=" \
+        --include="*.ts" --include="*.js" src/ 2>/dev/null | wc -l)
+      
+      if [ $SECRETS -gt 0 ]; then
+        echo "❌ SECURITY ERROR: 민감한 정보가 코드에 포함되어 있습니다"
+        echo "모든 비밀은 .env 파일에 저장하세요"
+        exit 1
+      fi
+
+  # ============================================================
+  # [4] 테스트 통과 확인 후 커밋
+  # ============================================================
+  
+  - name: test-gate
+    description: git commit 시 테스트 자동 실행 (선택)
+    on: bash-command
+    match: "^git commit"
+    context: implementer
+    disabled: true  # 원하면 false로 변경
+    action: |
+      # 테스트 실행
+      echo "🧪 Running tests..."
+      npm test 2>&1 | tail -5
+      
+      if [ $? -ne 0 ]; then
+        echo "❌ Tests failed. Fix tests before committing."
+        exit 1
+      fi
+      echo "✓ Tests passed"
+
+  # ============================================================
+  # [5] 파일 타입 검증
+  # ============================================================
+  
+  - name: validate-json-files
+    description: JSON 파일 작성 시 유효성 검증
+    on: file-write
+    match: ".*\\.json$"
+    context: implementer
+    disabled: false
+    action: |
+      # JSON 유효성 검증
+      jq empty "$FILE" 2>&1 | head -1
+      
+      if [ $? -ne 0 ]; then
+        echo "❌ Invalid JSON in $FILE"
+        exit 1
+      fi
+      echo "✓ JSON valid"
+
+  # ============================================================
+  # [6] 마이그레이션 스크립트 검증
+  # ============================================================
+  
+  - name: validate-migrations
+    description: DB 마이그레이션 파일 검증
+    on: file-write
+    match: "migrations/.*\\.sql$|migrations/.*\\.ts$"
+    context: implementer
+    disabled: false
+    action: |
+      FILE_NAME=$(basename "$FILE")
+      
+      # 마이그레이션 파일명 형식 확인
+      if ! [[ $FILE_NAME =~ ^[0-9]{10,14}.*\.(sql|ts)$ ]]; then
+        echo "⚠️  마이그레이션 파일명 권장: YYYYMMDDHHMM_description.sql"
+        echo "예: 202606021430_add_user_index.sql"
+      fi
+      
+      # SQL 파일인 경우 기본 구조 확인
+      if [[ $FILE_NAME == *.sql ]]; then
+        if ! grep -q "BEGIN\|CREATE\|ALTER\|INSERT" "$FILE"; then
+          echo "⚠️  마이그레이션 파일이 비어있거나 SQL이 없습니다"
+        fi
+      fi
+
+  # ============================================================
+  # [7] TypeScript 컴파일 자동 실행 (선택)
+  # ============================================================
+  
+  - name: auto-compile-ts
+    description: TypeScript 파일 수정 시 컴파일 체크
+    on: file-write
+    match: "src/.*\\.ts$"
+    context: implementer
+    disabled: true  # 무거우면 비활성화
+    action: |
+      # 증분 컴파일만 실행 (tsc --noEmit)
+      npx tsc --noEmit 2>&1 | grep -i "error" | head -3
+      
+      if [ $? -eq 0 ]; then
+        echo "⚠️  TypeScript 컴파일 에러. 'npm run build'로 확인하세요"
+      fi
+
+  # ============================================================
+  # [8] 로깅 및 통계
+  # ============================================================
+  
+  - name: log-work
+    description: 작업 내역 자동 기록 (선택)
+    on: bash-command
+    match: "^git commit"
+    context: implementer
+    disabled: true  # 원하면 활성화
+    action: |
+      # 커밋 메시지 기록
+      COMMIT_MSG=$(git log -1 --pretty=%B)
+      echo "[$(date +%Y-%m-%d\ %H:%M:%S)] Commit: $COMMIT_MSG" >> .claude/logs/work.log
+
+# ============================================================
+# Hook 사용 팁
+# ============================================================
+# 
+# 1. Hook 활성화/비활성화
+#    - 활성: disabled: false
+#    - 비활성: disabled: true
+# 
+# 2. 특정 Subagent에서만 실행
+#    - context: analyzer  (analyzer에서만)
+#    - context: implementer (implementer에서만)
+#    - context 생략 (모든 agent)
+# 
+# 3. 정규표현식 패턴 (match)
+#    - "src/.*\\.ts$"     → src/ 내 모든 .ts 파일
+#    - ".*\\.test\\.ts$"  → 모든 .test.ts 파일
+#    - "^git commit"      → git commit 명령어
+# 
+# 4. 진단 명령어
+#    - npm test              → 테스트 실행
+#    - npm run lint          → 린트 검사
+#    - npm run build         → 빌드
+#    - npx prettier --write  → 포매팅
+#    - npx eslint --fix      → ESLint 자동 수정
+# 
+# 5. 종료 코드
+#    - exit 0: 성공 (계속 진행)
+#    - exit 1: 실패 (작업 중단)
+# 
+# ============================================================
+# 커스터마이징 예제
+# ============================================================
+# 
+# 프로젝트별로 다음을 추가할 수 있습니다:
+# 
+# 1. 특정 명령어 블로킹
+#    - 위험한 bash 명령어 (rm -rf /) 방지
+#    - 실수로 main 브랜치에 푸시하는 것 방지
+# 
+# 2. 자동 생성
+#    - 파일 수정 시 자동으로 .d.ts 생성
+#    - 마이그레이션 후 자동으로 스키마 업데이트
+# 
+# 3. 프로젝트별 규칙
+#    - 특정 디렉토리 구조 강제
+#    - 파일명 규칙 (예: UserService, UserRepository)
+#    - 구글 스타일 가이드 적용
+# 
+# ============================================================
+```
+
+---
+
+## 프로젝트별 Hook 커스터마이징 가이드
+
+### 기본 구조 (모든 프로젝트)
+```yaml
+hooks:
+  # 포매팅 자동화
+  - name: auto-format-typescript
+    on: file-write
+    match: "src/.*\\.ts$"
+    action: npx prettier --write "$FILE"
+  
+  # 디버깅 코드 방지
+  - name: block-debug-code
+    on: bash-command
+    match: "^git commit"
+    action: grep -r "console.log" src/ && exit 1 || exit 0
+```
+
+### 추가 옵션 (프로젝트에 따라)
+
+#### 1️⃣ 마이크로서비스 프로젝트
+```yaml
+  # 서비스 간 경계 유지
+  - name: validate-service-boundaries
+    on: file-write
+    match: "services/auth/.*\\.ts$"
+    action: |
+      # auth 서비스에서 api 서비스로 import하는 것 방지
+      if grep -q "from.*services/api" "$FILE"; then
+        echo "❌ Auth service cannot import from API service"
+        exit 1
+      fi
+```
+
+#### 2️⃣ 데이터베이스 프로젝트
+```yaml
+  # 마이그레이션 버전 자동 증가
+  - name: validate-migration-version
+    on: file-write
+    match: "migrations/.*\\.sql$"
+    action: |
+      # 마이그레이션 파일 버전 확인
+      LATEST=$(ls migrations/ | sort | tail -1 | cut -d_ -f1)
+      NEW_FILE=$(basename "$FILE" | cut -d_ -f1)
+      
+      if [ "$NEW_FILE" -le "$LATEST" ]; then
+        echo "❌ Migration version must be higher than $LATEST"
+        exit 1
+      fi
+```
+
+#### 3️⃣ React/Vue 프로젝트
+```yaml
+  # 컴포넌트 파일명 규칙
+  - name: validate-component-naming
+    on: file-write
+    match: "src/components/.*\\.tsx?$"
+    action: |
+      FILENAME=$(basename "$FILE" | cut -d. -f1)
+      
+      if ! [[ $FILENAME =~ ^[A-Z] ]]; then
+        echo "❌ Component filename must start with uppercase"
+        exit 1
+      fi
+```
+
+---
+
+## 실행 예시
+
+### 자동 포매팅
+```bash
+# 파일 저장 시
+$ echo "const x=1" > src/app.ts
+
+# 자동 실행:
+# → npx prettier --write src/app.ts
+# → npx eslint --fix src/app.ts
+
+# 결과:
+$ cat src/app.ts
+const x = 1;  # 자동으로 포매팅됨
+```
+
+### 디버깅 코드 방지
+```bash
+# 커밋 시도
+$ git add .
+$ git commit -m "Add feature"
+
+# 자동 검사:
+# → grep -r "console.log\|debugger" src/
+
+# 발견되면:
+# ❌ ERROR: 디버깅 코드를 제거한 후 커밋하세요
+# git commit 실패 (수정 후 재시도)
+```
+
+---
+
+## 성능 고려사항
+
+### 무거운 Hook (비활성화 권장)
+```yaml
+- name: auto-compile-ts
+  disabled: true  # npm run build가 더 빠름
+```
+
+### 가벼운 Hook (항상 활성화)
+```yaml
+- name: auto-format
+  disabled: false  # 빠른 도구 (prettier, eslint)
+```
+
+### 최적화 팁
+1. 정규식 최대한 구체적으로 (성능 향상)
+2. 큰 파일은 grep 전에 size 확인
+3. 빠른 피드백 필요하면 fork 사용 (가능하면)
+
+---
+
+## 주의사항
+
+1. **Exit Code**
+   - `exit 0`: 성공 (계속 진행)
+   - `exit 1`: 실패 (작업 중단)
+
+2. **변수**
+   - `$FILE`: 현재 파일 경로
+   - `$COMMAND`: 실행한 명령어
+   - 기본 bash 변수 모두 사용 가능
+
+3. **무한 루프 방지**
+   - Hook이 파일을 수정하면 다시 Hook 트리거될 수 있음
+   - 필요하면 `disabled` flag로 제한
+
+4. **Context 지정**
+   ```yaml
+   context: implementer  # Implementer에서만 실행
+   context: tester       # Tester에서만 실행
+   # 생략하면 모든 agent에서 실행
+   ```
